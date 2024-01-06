@@ -1,5 +1,5 @@
 # nestjs-waiting-room-middleware-keepalive
-NestJS middleware using HTTP keep-alive to provide waiting room functionality
+Middleware for NestJS using HTTP keep-alive to provide waiting room functionality
 
 ## How it works
 If a client requests a route, the middleware checks whether the client is allowed to proceed with its request based on defined limits.
