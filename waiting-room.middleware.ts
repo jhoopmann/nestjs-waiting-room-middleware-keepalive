@@ -14,9 +14,7 @@ export interface WaitingRoomResponseData {
 }
 
 export const WaitingRoomOptionsDefaults: Partial<WaitingRoomOptions> = {
-    getClientIdentifier(request: Request) {
-        return request.ip;
-    },
+    getClientIdentifier: (request: Request) => request.ip,
     maxClientRequests: 3,
     maxProcessing: 1,
     maxWaiting: 10,
@@ -47,11 +45,19 @@ export class WaitingRoomOptions {
     }
 }
 
+interface ClientMapData {
+    request: Request,
+    response: Response,
+    next: NextFunction
+}
+
+type ClientMap = Map<number, ClientMapData>;
+
 @Injectable()
 export class WaitingRoomMiddleware implements NestMiddleware {
-    private readonly clients: Map<string, Set<number>> = new Map();
-    private readonly waiting: Set<number> = new Set();
-    private readonly processing: Set<number> = new Set();
+    private readonly clients: Map<string, ClientMap> = new Map();
+    private readonly waiting: Map<number, string> = new Map();
+    private readonly processing: Map<number, string> = new Map();
 
     public constructor(private readonly options: WaitingRoomOptions) {
     }
@@ -60,97 +66,96 @@ export class WaitingRoomMiddleware implements NestMiddleware {
         const clientId: string = this.options.getClientIdentifier(request);
         const requestId: number = Math.ceil(Math.random() * 10 ** 8);
 
-        const requestSet: Set<number> = this.clients.get(clientId) ?? new Set<number>();
+        const clientMap: ClientMap = this.clients.get(clientId) ?? new Map();
 
         if (this.waiting.size >= this.options.maxWaiting ||
-            requestSet.size >= this.options.maxClientRequests
+            clientMap.size >= this.options.maxClientRequests
         ) {
             throw new HttpException(this.options.errors.ERROR_REQUEST_LIMIT, HttpStatus.TOO_MANY_REQUESTS);
         }
 
-        requestSet.add(requestId);
+        const clientMapData: ClientMapData = {request, response, next};
+        clientMap.set(requestId, clientMapData);
         if (!this.clients.has(clientId)) {
-            this.clients.set(clientId, requestSet);
+            this.clients.set(clientId, clientMap);
         }
 
         if (this.processing.size >= this.options.maxProcessing) {
-            this.waiting.add(requestId);
-            const proceed: boolean = await this.waitForQueue(
-                requestId,
-                this.waiting.size + 1,
-                request,
-                response
-            );
-            this.waiting.delete(requestId);
+            this.waiting.set(requestId, clientId);
+            this.sendWaitingRoomResponse(clientMapData, this.waiting.size);
 
-            if (!proceed) {
-                requestSet.delete(requestId);
-
-                return;
-            }
+            return;
         }
 
-        this.processing.add(requestId);
+        this.startProcessing(clientMap, requestId, clientId, next);
+    }
 
-        (<WaitingRoomRequest>request).requestQueueMiddleware = {
+    private startProcessing(clientMap: ClientMap, requestId: number, clientId: string, next: NextFunction): void {
+        this.processing.set(requestId, clientId);
+
+        (<WaitingRoomRequest>clientMap.get(requestId).request).requestQueueMiddleware = {
             clientIdentifier: clientId,
             requestIdentifier: requestId,
-            finishProcessing: this.finishProcessing.bind(this, requestSet, requestId, clientId)
+            finishProcessing: this.finishProcessing.bind(this, clientMap, requestId, clientId)
         };
 
         next();
     }
 
-    private waitForQueue(
-        requestId: number,
-        queuePosition: number,
-        request: Request,
-        response: Response
-    ): Promise<boolean> {
-        return new Promise((resolve): void => {
-            if (request.socket.closed) {
-                resolve(false);
-            }
+    private finishProcessing(clientMap: ClientMap, requestId: number, clientId: string): void {
+        this.processing.delete(requestId);
+        clientMap.delete(requestId);
 
-            const newPosition: number = Array.from(this.waiting).indexOf(requestId) + 1;
-            if (queuePosition !== newPosition) {
-                queuePosition = newPosition;
+        if (clientMap.size === 0) {
+            this.clients.delete(clientId);
+        }
 
-                this.sendQueueResponseKeepAlive(queuePosition, response);
-            }
+        this.executeNextWaiting();
+    }
 
-            if (queuePosition === 1 && this.processing.size < this.options.maxProcessing) {
-                this.sendQueueResponseKeepAlive(0, response);
-                resolve(true);
+    private executeNextWaiting(): void {
+        const iteratorResult: IteratorResult<number> = this.waiting.keys().next();
+        if (!iteratorResult.done) {
+            const requestId: number = iteratorResult.value;
+            const clientId: string = this.waiting.get(requestId);
+            const clientMap: ClientMap = this.clients.get(clientId);
+            const clientMapData: ClientMapData = clientMap.get(requestId);
+
+            this.waiting.delete(requestId);
+            this.sendAllWaitingRoomResponse();
+
+            if (clientMapData.request.socket.closed) {
+                this.finishProcessing(clientMap, requestId, clientId);
 
                 return;
             }
 
-            setTimeout(
-                async (): Promise<void> => {
-                    resolve(await this.waitForQueue(requestId, queuePosition, request, response));
-                },
-                this.options.msWaitingCheckInterval
-            );
-        });
+            this.sendWaitingRoomResponse(clientMapData, 0);
+            this.startProcessing(clientMap, requestId, clientId, clientMapData.next)
+        }
     }
 
-    private sendQueueResponseKeepAlive(queuePosition: number, response: Response): void {
-        if (!response.headersSent) {
+    private sendAllWaitingRoomResponse(): void {
+        Array.from(this.waiting.keys()).forEach(
+            (requestId: number, queuePosition: number): void => {
+                queuePosition++;
+
+                const clientId: string = this.waiting.get(requestId);
+                const clientMapData: ClientMapData = this.clients.get(clientId).get(requestId);
+
+                this.sendWaitingRoomResponse(clientMapData, queuePosition);
+            }
+        );
+    }
+
+    private sendWaitingRoomResponse(clientMapData: ClientMapData, queuePosition: number): void {
+        if (!clientMapData.response.headersSent) {
             for (const key in this.options.headers) {
-                response.setHeader(key, this.options.headers[key]);
+                clientMapData.response.setHeader(key, this.options.headers[key]);
             }
         }
 
-        response.write(JSON.stringify(<WaitingRoomResponseData>{queuePosition}));
-    }
-
-    private finishProcessing(requestSet: Set<number>, requestId: number, clientId: string): void {
-        this.processing.delete(requestId);
-        requestSet.delete(requestId);
-
-        if (requestSet.size === 0) {
-            this.clients.delete(clientId);
-        }
+        clientMapData.response.write(JSON.stringify(<WaitingRoomResponseData>{queuePosition}));
     }
 }
+
