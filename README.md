@@ -2,19 +2,11 @@
 NestJS middleware using HTTP keep-alive to provide waiting room functionality
 
 ## How it works
+If a client requests a route, the middleware checks whether the client is allowed to proceed with its request based on defined limits.
 
-If a client requests a route, the middleware checks wether the
-client is allowed to proceed it's request based on defined limits.
+If the client has to wait, the middleware will initialize a keep-alive connection and send a ```WaitingRoomResponse { queuePosition: number }``` if the position has changed. It will send a queuePosition with 0 if it starts processing the request.
 
-if the client has to wait, the middleware will initialize a keep-alive 
-connection and sends a ```WaitingRoomResponse { queuePosition: number }```
-if the position has changed. It will send a queuePosition with 0, if it starts
-starts processing the request.
-
-Controller methods should use ```Response::write``` and ```Response::end``` 
-because of already sent headers.
-## Usage
-
+Controller methods should use ```Response::write``` and ```Response::end```  because headers have already been sent.
 ### Backend
 
 ```
@@ -49,9 +41,7 @@ export class AppModule implements NestModule {
 }
 ```
 
-### Frontend
-
-You could implement it in your frontend this way:
+### Frontend example
 
 ```
 function handleResponse(response: Response) {
