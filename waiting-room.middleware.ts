@@ -62,7 +62,7 @@ export class WaitingRoomMiddleware implements NestMiddleware {
     public constructor(private readonly options: WaitingRoomOptions) {
     }
 
-    public async use(request: Request, response: Response, next: NextFunction): Promise<void> {
+    public use(request: Request, response: Response, next: NextFunction): void {
         const clientId: string = this.options.getClientIdentifier(request);
         const requestId: number = Math.ceil(Math.random() * 10 ** 8);
 
